@@ -147,6 +147,8 @@ def make_app(g):
         return web.json_response({"window": span, "rows": rows,
                                   "totals": {"n": t["n"], "turn": t["tv"] or 0, "avg": t["p"]}})
 
+    ALIAS = getattr(g, "asset_alias", lambda: {})()
+    M.ALIAS.update(ALIAS)
     SEM, inflight, miss = asyncio.Semaphore(6), {}, {}
 
     async def fetch_asset(slug, ext):
@@ -190,6 +192,7 @@ def make_app(g):
         slug, ext = re.sub(r"[^a-z0-9]", "", request.match_info["slug"].lower()), request.match_info["ext"]
         if ext not in ("json", "webp", "thumb") or not slug:
             return web.Response(status=404)
+        slug = ALIAS.get(slug, slug)  # переименованные подарки (Redo -> resistancedog на Fragment)
         path = await get_asset(slug, ext)
         if not path:
             return web.Response(status=404, headers={"Cache-Control": "max-age=60"})
@@ -385,7 +388,8 @@ async def warm(g, app):
     while True:
         try:
             for n in g.all_names():
-                await app["get_asset"](re.sub(r"[^a-z0-9]", "", n.lower()), "thumb")
+                sl = re.sub(r"[^a-z0-9]", "", n.lower())
+                await app["get_asset"](g.asset_alias().get(sl, sl), "thumb")
         except Exception:
             pass
         await asyncio.sleep(1800)

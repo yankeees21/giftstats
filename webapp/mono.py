@@ -20,6 +20,7 @@ MONO_HUE = float(os.getenv("MONO_HUE", "30"))  # допустимая разни
 NAMES = [(15, "красный"), (45, "оранжевый"), (70, "жёлтый"), (160, "зелёный"), (200, "бирюзовый"), (255, "синий"),
          (290, "фиолетовый"), (330, "розовый"), (361, "красный")]
 MEM, _sem = {}, None
+ALIAS = {}  # {слаг нашего названия: слаг на Fragment}
 
 
 def hue_name(h):
@@ -90,6 +91,7 @@ async def detect(collection, num):
     if Image is None or not num:
         return None
     slug = re.sub(r"[^a-z0-9]", "", collection.lower())
+    slug = ALIAS.get(slug, slug)
     key = f"{slug}-{num}"
     if key in MEM:
         return MEM[key]
