@@ -1,4 +1,4 @@
-# Secrets and environment
+# Environment and secrets
 .env
 .env.*
 !.env.example
@@ -6,6 +6,8 @@
 *.auth_ok
 *secret*
 *credential*
+*.pem
+*.key
 
 # Databases and runtime state
 *.db
@@ -18,7 +20,7 @@ cache/
 __pycache__/
 *.py[cod]
 
-# Local and backup files
+# Backups and old versions
 *.bak
 *.backup
 *.old
