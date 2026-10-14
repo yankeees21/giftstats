@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-VERSION = "v22"
+VERSION = "v24"
 SELF = os.path.basename(__file__)  # имя файла, под которым бот запущен (giftstats.py и т.п.)
 
 
@@ -806,12 +806,13 @@ class MRKT(Market):
             fl = nano_to_ton(x, "floor_price_nano_tons", "floor_price_ton")
             if not title or fl <= 0 or getattr(x, "is_hidden", False):
                 continue  # без листингов (floor=None) или скрытая — пропускаем
-            self._names[norm(title)] = getattr(x, "name", None) or title
+            shown = DISPLAY_NAMES.get(title, title)
+            self._names[norm(shown)] = getattr(x, "name", None) or title
             prev = num(getattr(x, "previous_day_floor_price_nano_tons", 0) or 0) / 1e9
             vol = num(getattr(x, "volume", 0) or 0)
             if vol > 1e8:  # похоже на nanoTON
                 vol /= 1e9
-            out.append(dict(collection=title, floor=fl, listed=0, volume=vol, prev=prev or None))
+            out.append(dict(collection=shown, floor=fl, listed=0, volume=vol, prev=prev or None))
         return out
 
     async def listings(self, collection, model=None, backdrop=None, symbol=None, limit=100):
@@ -849,6 +850,16 @@ class Getgems(Market):
 
 
 MARKETS: list[Market] = [Portals(), Tonnel(), MRKT(), Getgems()]
+DISPLAY_NAMES = {}  # как называть подарок у нас: {название у маркета: наше название}. Сейчас пусто: показываем, как записано на MRKT.
+LEGACY_RENAMES = {"Redo": "Resistance Dog"}  # одноразовый возврат данных, если успели переименовать
+
+
+def asset_alias():
+    """{слаг нашего названия: слаг названия на Fragment} — чтобы картинки находились и после переименования."""
+    sl = lambda s: re.sub(r"[^a-z0-9]", "", s.lower())
+    return {sl(new): sl(old) for old, new in DISPLAY_NAMES.items()}
+
+
 ENABLED_MARKETS = {"MRKT"}  # пока работаем только с MRKT; чтобы вернуть остальные, добавь их названия
 MARKETS[:] = [m for m in MARKETS if m.name in ENABLED_MARKETS]
 
@@ -936,6 +947,10 @@ def init_db():
             with contextlib.suppress(sqlite3.OperationalError):
                 c.execute(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}")  # миграция старой схемы
         c.execute("CREATE INDEX IF NOT EXISTS ixs ON sold(collection, ts)")
+        for old_, new_ in list(DISPLAY_NAMES.items()) + [(o, n) for o, n in LEGACY_RENAMES.items() if o not in DISPLAY_NAMES.values()]:  # переименования в накопленных данных
+            for tbl in ("snap", "cur", "msnap", "sold", "lst", "portfolio", "alerts2"):
+                with contextlib.suppress(sqlite3.Error):
+                    c.execute(f"UPDATE OR IGNORE {tbl} SET collection=? WHERE collection=?", (new_, old_))
         c.execute("CREATE TABLE IF NOT EXISTS alerts(uid INTEGER, collection TEXT, dir TEXT, price REAL, ts INTEGER)")
         c.execute("CREATE TABLE IF NOT EXISTS alerts2(uid INTEGER, collection TEXT, type TEXT, value REAL, ts INTEGER, fired INTEGER)")
 
@@ -2190,6 +2205,7 @@ async def show_listings(c: CallbackQuery):
     items = (await gather_listings(st))[:10]
     try:
         import mono as MN
+        MN.ALIAS.update(asset_alias())
         tags = await asyncio.gather(*[asyncio.wait_for(MN.detect(st["col"], i.get("num")), 8) for i in items], return_exceptions=True)
     except Exception:
         tags = [None] * len(items)

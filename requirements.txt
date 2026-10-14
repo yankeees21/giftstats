@@ -1,5 +1,8 @@
 aiogram>=3.7
-portalsmp
+faportalsmp
 tonnelmp
 fake_useragent==2.2.0
 amrkt
+tgcrypto
+MRKTAPI
+Pillow
