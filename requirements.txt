@@ -1,0 +1,5 @@
+aiogram>=3.7
+portalsmp
+tonnelmp
+fake_useragent==2.2.0
+amrkt

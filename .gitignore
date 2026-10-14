@@ -1,0 +1,25 @@
+# Secrets and environment
+.env
+.env.*
+!.env.example
+*.token
+*.auth_ok
+*secret*
+*credential*
+
+# Databases and runtime state
+*.db
+*.sqlite
+*.sqlite3
+*.session
+*.session-journal
+*.log
+cache/
+__pycache__/
+*.py[cod]
+
+# Local and backup files
+*.bak
+*.backup
+*.old
+giftstats.py.pre-github-*
