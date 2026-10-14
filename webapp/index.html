@@ -117,7 +117,6 @@ html,body{max-width:100%;overflow-x:hidden}
 .hero>div,.prow>.rb,.item>div,.rw>.rb{min-width:0}
 #box>*,.card,table{max-width:100%}img,svg{max-width:100%}
 input,select,textarea{min-width:0;max-width:100%}
-.ava::after{display:none!important}.ava img{animation:flt 5s ease-in-out infinite}@keyframes flt{50%{transform:translateY(-3px) scale(1.025)}}
 </style></head><body>
 <div id="splash"><div class="spl" id="spl"></div><div class="sbar"><i></i></div><div class="sname">GIFT STATS</div></div>
 <header><h1><span id="lg" class="lg"></span>Gift Stats <span class="live on" id="lv"><i></i><b id="lvt">LIVE</b></span></h1><input id="q" placeholder="Поиск подарка…" type="search"></header>
@@ -316,8 +315,7 @@ const JS=new Map(),MAXA=6,ACT=new Set(),QU=[];let busy=0;
 async function lj(s){if(JS.has(s)){const v=JS.get(s);JS.delete(s);JS.set(s,v);return v}
  const p=fetch('/asset/'+s+'.json').then(r=>r.ok?r.json():null).catch(()=>null);JS.set(s,p);if(JS.size>8)JS.delete(JS.keys().next().value);return p}
 function stop(el){if(el._a){try{el._a.destroy()}catch(e){}el._a=null}ACT.delete(el);el._q=0}
-const ANIM=false; // Lottie-ролики NFT с Fragment отключены: модель в них «въезжает и улетает», в петле выглядит криво
-async function start(el){if(!ANIM||el._a||!el.isConnected)return;const j=await lj(el.dataset.s);if(!j||!window.lottie||!el.isConnected||!el._vis||el._a)return;
+async function start(el){if(el._a||!el.isConnected)return;const j=await lj(el.dataset.s);if(!j||!window.lottie||!el.isConnected||!el._vis||el._a)return;
  while(ACT.size>=MAXA){const o=[...ACT].find(x=>!x._vis||!x.isConnected)||ACT.values().next().value;if(o===el)return;stop(o)}
  ACT.add(el);el._a=lottie.loadAnimation({container:el,renderer:'canvas',loop:true,autoplay:true,animationData:j,rendererSettings:{clearCanvas:true,preserveAspectRatio:'xMidYMid slice',progressiveLoad:true}})}
 async function pump(){if(busy)return;busy=1;while(QU.length){const el=QU.shift();el._q=0;if(el._vis)await start(el);await new Promise(r=>setTimeout(r,120))}busy=0}
