@@ -13,6 +13,8 @@ CONFIG = {
     "speed_full": 3.0,                # продаж/час, при которых фактор скорости = 100
     # Комиссия продажи на маркете (доля). TODO: заполнить реальными значениями; цены Tonnel в боте уже с +10%.
     "fees": {"Portals": 0.0, "MRKT": 0.0, "Tonnel": 0.0, "Getgems": 0.0},
+    # Подтверждена ли комиссия маркета (True только когда ставка выше проверена по правилам маркета). Пока нигде не подтверждена.
+    "fees_confirmed": {"Portals": False, "MRKT": False, "Tonnel": False, "Getgems": False},
     "withdrawal_fee": 0.0,            # TON, TODO
     "anomaly": {"floor_pct": 15, "sales_ratio": 2.5, "volume_pct": 50, "min_recent_sales": 3},
 }
@@ -111,6 +113,14 @@ def signals(data):
     return {"items": items, "insufficient": insufficient, "config": {"buy": CONFIG["buy"], "watch": CONFIG["watch"]}}
 
 
+def fees_status(markets):
+    """Подтверждены ли комиссии у ВСЕХ перечисленных маркетов (а не у любого одного)."""
+    conf = CONFIG.get("fees_confirmed", {})
+    ok = [m for m in markets if conf.get(m)]
+    bad = [m for m in markets if not conf.get(m)]
+    return dict(all=bool(markets) and not bad, confirmed=ok, unconfirmed=bad)
+
+
 def arbitrage(data):
     res, F = [], CONFIG["fees"]
     for x in data.values():
@@ -123,9 +133,10 @@ def arbitrage(data):
         if profit > 0 and buy > 0:
             res.append(dict(gift=x["name"], buy_market=bm, sell_market=sm, buy_price=buy, sell_price=sell,
                             spread_percent=(sell / buy - 1) * 100, estimated_profit=profit,
-                            estimated_profit_percent=profit / buy * 100, updated_at=x["updated_at"]))
+                            estimated_profit_percent=profit / buy * 100, updated_at=x["updated_at"],
+                            fees_confirmed=bool(CONFIG["fees_confirmed"].get(sm) and CONFIG["fees_confirmed"].get(bm))))
     res.sort(key=lambda r: -r["estimated_profit_percent"])
-    return {"items": res, "fees_known": any(CONFIG["fees"].values())}
+    return {"items": res, "fees_known": bool(res) and all(r["fees_confirmed"] for r in res)}
 
 
 def anomalies(data, old_volume):
@@ -187,7 +198,7 @@ def sales_stats(g, name):
     now, out = int(time.time()), {}
     with g.db() as c:
         first = c.execute("SELECT MIN(first) f FROM lst WHERE collection=?", (name,)).fetchone()["f"]
-        for key, hrs in (("d1", 24), ("d7", 168)):
+        for key, hrs in (("d1", 24), ("d7", 168), ("d30", 720)):
             pr = [r[0] for r in c.execute("SELECT price FROM sold WHERE collection=? AND ts>=?", (name, now - hrs * 3600))]
             span = min(hrs, (now - first) / 3600) if first else 0
             out[key] = dict(n=len(pr), span_h=span, avg=statistics.fmean(pr) if pr else None,
@@ -295,7 +306,14 @@ def advice(pos, x, s):
     return dict(action=a[0], label=a[1], text=a[2], reasons=R, confidence=s["confidence"] if s else None)
 
 
-def portfolio_report(g, rows, data):
+def _col(r, k):
+    try:
+        return r[k]
+    except (KeyError, IndexError):
+        return None
+
+
+def portfolio_report(g, rows, data, overrides=None):
     sig = {i["gift"]: i for i in signals(data)["items"]}
     out, tv, ti, ta = [], 0.0, 0.0, 0.0
     for r in rows:
@@ -306,10 +324,12 @@ def portfolio_report(g, rows, data):
             m = next((y for y in mrows if y["v"] == r["model"] and y["floor"]), None)
             if m:
                 cur, basis = m["floor"], "model"
+        if overrides and r["r"] in overrides:  # точная цена: самый дешёвый лот с такой моделью/фоном
+            cur, basis = overrides[r["r"]]["price"], "exact"
         inv = r["qty"] * r["buy"]
         val = r["qty"] * cur if cur is not None else None
         pnl = val - inv if val is not None else None
-        pos = dict(id=r["r"], gift=n, model=r["model"], qty=r["qty"], buy=r["buy"], current=cur, basis=basis, invested=inv,
+        pos = dict(id=r["r"], gift=n, model=r["model"], backdrop=_col(r, "backdrop"), symbol=_col(r, "symbol"), qty=r["qty"], buy=r["buy"], current=cur, basis=basis, invested=inv,
                    value=val, pnl=pnl, roi=pnl / inv * 100 if pnl is not None and inv else None,
                    updated_at=x["updated_at"] if x else None, stale=x["stale"] if x else None)
         pos["advice"] = advice(pos, x, sig.get(n))

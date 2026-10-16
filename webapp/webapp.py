@@ -5,6 +5,7 @@ import aiohttp
 
 import analytics as A
 import mono as M
+import ai as AI
 from urllib.parse import parse_qsl
 
 from aiohttp import web
@@ -167,8 +168,19 @@ def make_app(g):
                         try:
                             async with ses.get(url) as r:
                                 if r.status == 200:
+                                    data = await r.read()
+                                    if ext == "thumb" and M.Image is not None:  # уменьшаем превью: быстрее грузится на телефоне
+                                        try:
+                                            import io
+                                            im = M.Image.open(io.BytesIO(data)).convert("RGBA")
+                                            im.thumbnail((360, 360))
+                                            buf = io.BytesIO()
+                                            im.save(buf, "WEBP", quality=82, method=4)
+                                            data = buf.getvalue()
+                                        except Exception:
+                                            pass
                                     with open(path + ".tmp", "wb") as f:
-                                        f.write(await r.read())
+                                        f.write(data)
                                     os.replace(path + ".tmp", path)
                                     return path
                         except Exception:
@@ -256,27 +268,78 @@ def make_app(g):
     async def models(request):
         """Все известные модели подарка с текущим floor: из истории бота + живые лоты прямо сейчас."""
         name, out = request.query.get("name", ""), {}
-        rows, _ = g.demand_rows("model", name, 24)
+        kind = request.query.get("kind", "model")
+        kind = kind if kind in ("model", "backdrop", "symbol") else "model"
+        rows, _ = g.demand_rows(kind, name, 24)
         for r in rows:
             if r["floor"]:
                 out[r["v"]] = dict(v=r["v"], floor=r["floor"], listed=r["listed"] or None)
         try:
             agg, _ = await asyncio.wait_for(g.kind_data(name), 12)
-            for v, (fl, cnt) in agg["model"].items():
+            for v, (fl, cnt) in agg[kind].items():
                 out[v] = dict(v=v, floor=fl, listed=cnt or None)
         except Exception:
             pass
-        for m in g.active_markets():  # полный список моделей у маркета, если он умеет (MRKT)
-            fn = getattr(m, "all_models", None)
+        for m in g.active_markets():  # полный список у маркета, если он умеет (MRKT)
+            fn = getattr(m, "all_models" if kind == "model" else "all_attrs", None)
             if fn:
                 try:
-                    full = await g.guarded(m, lambda fn=fn: fn(name), 25, detail=True) or {}
+                    call = (lambda fn=fn: fn(name)) if kind == "model" else (lambda fn=fn: fn(name, kind))
+                    full = await g.guarded(m, call, 25, detail=True) or {}
                     for v, (fl, cnt) in full.items():
                         out.setdefault(v, dict(v=v, floor=fl or None, listed=cnt or None))
                 except Exception:
                     pass
         floor = next((a["floor"] for a in g.agg_all() if a["name"] == name), None)
         return web.json_response({"items": sorted(out.values(), key=lambda x: (x["floor"] is None, x["floor"] or 0)), "collection_floor": floor})
+
+    PC = {}
+
+    async def price_for(name, model=None, backdrop=None, symbol=None):
+        """Самый дешёвый лот с такими параметрами у активных маркетов (кэш 90 с)."""
+        key = (name, model, backdrop, symbol)
+        hit = PC.get(key)
+        if hit and time.time() - hit[0] < 90:
+            return hit[1]
+        flt = {k: v for k, v in (("model", model), ("backdrop", backdrop), ("symbol", symbol)) if v}
+        res = await asyncio.gather(*[g.guarded(m, lambda m=m: m.listings(name, limit=5, **flt), 8, detail=True)
+                                     for m in g.active_markets()], return_exceptions=True)
+        items = sorted([i for r in res if isinstance(r, list) for i in r], key=lambda i: i["price"])
+        out = dict(price=items[0]["price"], url=items[0].get("url"), n=len(items)) if items else None
+        PC[key] = (time.time(), out)
+        return out
+
+    async def price(request):
+        q = request.query
+        p = await price_for(q.get("name", ""), q.get("model") or None, q.get("backdrop") or None, q.get("symbol") or None)
+        return web.json_response(p or {})
+
+    async def rising(request):
+        """Какая модель подарка растёт быстрее всех сейчас и самый дешёвый лот именно этой модели (для кнопки «Посмотреть»)."""
+        name, hrs = request.query.get("name", ""), HOURS.get(request.query.get("period"), 24)
+        rows = best_of(g, name, hrs)["model"]
+        grow = sorted([x for x in rows if x["chg"] is not None and x["chg"] > 0], key=lambda x: -x["chg"])
+        top = grow[0] if grow else (rows[0] if rows else None)
+        if not top:
+            return web.json_response({})
+        p = await price_for(name, top["v"]) or {}
+        return web.json_response(dict(model=top["v"], chg=top["chg"], floor=top["floor"], price=p.get("price"), url=p.get("url"), growing=bool(grow)))
+
+    async def mono_debug(request):
+        """Почему не определяется монохромность: есть ли номер NFT у лотов и что отвечает Fragment."""
+        name = request.query.get("name", "")
+        ms = [m for m in g.active_markets()]
+        res = await asyncio.gather(*[g.guarded(m, lambda m=m: m.listings(name, limit=5), 10, detail=True) for m in ms], return_exceptions=True)
+        out = []
+        for r in res:
+            for i in (r if isinstance(r, list) else [])[:5]:
+                det = None
+                try:
+                    det = await asyncio.wait_for(M.detect(name, i.get("num")), 10)
+                except Exception as e:
+                    det = f"ошибка: {e}"
+                out.append(dict(num=i.get("num"), price=i.get("price"), result=det, pillow=M.Image is not None))
+        return web.json_response({"lots": out})
 
     async def portfolio(request):
         """GET — портфель пользователя с оценкой и рекомендациями; POST — добавить {name,buy,qty,model} или удалить {delete:id}."""
@@ -285,6 +348,11 @@ def make_app(g):
             return web.json_response({"error": "unauthorized"}, status=401)
         with g.db() as c:
             c.execute("CREATE TABLE IF NOT EXISTS portfolio(uid INTEGER, collection TEXT, qty REAL, buy REAL, model TEXT, ts INTEGER)")
+            for col_ in ("backdrop", "symbol"):
+                try:
+                    c.execute(f"ALTER TABLE portfolio ADD COLUMN {col_} TEXT")
+                except Exception:
+                    pass
             if request.method == "POST":
                 try:
                     b = await request.json()
@@ -302,11 +370,36 @@ def make_app(g):
                         raise ValueError
                 except Exception:
                     return web.json_response({"error": "bad request"}, status=400)
-                c.execute("INSERT INTO portfolio(uid,collection,qty,buy,model,ts) VALUES(?,?,?,?,?,?)",
-                          (uid, name, qty, buy, (b.get("model") or None), int(time.time())))
+                c.execute("INSERT INTO portfolio(uid,collection,qty,buy,model,backdrop,symbol,ts) VALUES(?,?,?,?,?,?,?,?)",
+                          (uid, name, qty, buy, (b.get("model") or None), (b.get("backdrop") or None), (b.get("symbol") or None),
+                           int(time.time())))
                 return web.json_response({"ok": True})
             rows = c.execute("SELECT rowid r, * FROM portfolio WHERE uid=? ORDER BY rowid", (uid,)).fetchall()
-        return web.json_response(A.portfolio_report(g, rows, data_for(g, 24)))
+        ov = {}
+
+        async def one(r):  # точная цена по модели/фону/узору — самый дешёвый такой лот сейчас
+            if r["model"] or r["backdrop"] or r["symbol"]:
+                p = await price_for(r["collection"], r["model"], r["backdrop"], r["symbol"])
+                if p:
+                    ov[r["r"]] = p
+        await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
+        return web.json_response(A.portfolio_report(g, rows, data_for(g, 24), ov))
+
+    async def ai_chat(request):
+        """POST {messages:[{role,content}]} -> {text, updated_at} | {error}. user_id берётся из проверенной подписи Telegram."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "Некорректный запрос."}, status=400)
+        try:
+            res = await AI.chat(g, uid_of(request), body.get("messages") if isinstance(body, dict) else None)
+        except Exception:  # ai.chat сам не бросает, но Mini App не должен получить 500 ни при каких условиях
+            res = {"error": "ИИ временно недоступен из-за внутренней ошибки.", "code": "internal"}
+        payload, st = AI.http_response(res)
+        return web.json_response(payload, status=st)
+
+    async def ai_status(_):
+        return web.json_response(AI.status())
 
     async def ai_explain(request):
         try:
@@ -329,7 +422,7 @@ def make_app(g):
             m = m if isinstance(m, dict) else None  # нет картинки/номера -> «нет данных», а не догадка
             if only and not (m and m["mono"]):
                 continue
-            rows.append(dict({k: i.get(k) for k in ("market", "price", "model", "backdrop", "symbol", "url")},
+            rows.append(dict({k: i.get(k) for k in ("market", "price", "model", "backdrop", "symbol", "url", "num")},
                              mono=m["mono"] if m else None, mono_color=m["color"] if m else None, mono_purity=m["purity"] if m else None,
                              mono_model=m["model_color"] if m else None))
         return web.json_response({"items": rows[:12], "mono_available": M.Image is not None})
@@ -376,27 +469,29 @@ def make_app(g):
     app["get_asset"] = get_asset
     app.add_routes([web.get("/", index), web.get("/ping", ping), web.get("/api/summary", summary), web.get("/api/gift", gift),
                     web.get("/api/demand", demand), web.get("/api/markets", markets), web.get("/api/listings", listings), web.get("/api/signals", signals), web.get("/api/arbitrage", arbitrage),
-                    web.get("/api/anomalies", anomalies), web.get("/api/favorites", favorites), web.post("/api/ai/explain", ai_explain),
-                    web.get("/api/alerts", alerts), web.get("/api/portfolio", portfolio), web.get("/api/models", models), web.post("/api/portfolio", portfolio), web.post("/api/alerts", alerts), web.post("/api/alert", alert),
+                    web.get("/api/anomalies", anomalies), web.get("/api/favorites", favorites), web.post("/api/ai/explain", ai_explain), web.post("/api/ai/chat", ai_chat), web.get("/api/ai/status", ai_status),
+                    web.get("/api/alerts", alerts), web.get("/api/portfolio", portfolio), web.get("/api/models", models), web.get("/api/price", price), web.get("/api/rising", rising), web.get("/api/mono_debug", mono_debug), web.post("/api/portfolio", portfolio), web.post("/api/alerts", alerts), web.post("/api/alert", alert),
                     web.get("/asset/{slug}.{ext}", asset)])
     return app
 
 
 async def warm(g, app):
     """Прогрев кэша превью: все подарки подтягиваются заранее, чтобы плитки открывались мгновенно."""
-    await asyncio.sleep(10)
+    await asyncio.sleep(3)
     while True:
+        names = []
         try:
-            for n in g.all_names():
-                sl = re.sub(r"[^a-z0-9]", "", n.lower())
-                await app["get_asset"](g.asset_alias().get(sl, sl), "thumb")
+            names = [a["name"] for a in sorted(g.agg_all(), key=lambda a: -a["volume"])] or g.all_names()  # сначала самые ходовые
+            for i in range(0, len(names), 24):
+                await asyncio.gather(*[app["get_asset"](g.asset_alias().get(re.sub(r"[^a-z0-9]", "", n.lower()), re.sub(r"[^a-z0-9]", "", n.lower())), "thumb")
+                                       for n in names[i:i + 24]], return_exceptions=True)
         except Exception:
             pass
-        await asyncio.sleep(1800)
+        await asyncio.sleep(900 if not names else 1800)
 
 
 NEED = {"analytics": ("collect", "signals", "arbitrage", "anomalies", "explain", "sales_stats", "alert_context", "evaluate",
-                      "portfolio_report", "advice"), "mono": ("detect", "analyze")}
+                      "portfolio_report", "advice"), "mono": ("detect", "analyze"), "ai": ("chat", "status", "complete")}
 
 
 async def start_web(g, port=8088, host="127.0.0.1"):
