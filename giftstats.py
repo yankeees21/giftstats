@@ -20,7 +20,7 @@ from aiogram.filters import Command, CommandStart
 from aiogram.types import CallbackQuery, Message
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-VERSION = "v24"
+VERSION = "v27"
 SELF = os.path.basename(__file__)  # имя файла, под которым бот запущен (giftstats.py и т.п.)
 
 
@@ -44,7 +44,7 @@ def load_env(path):
 load_env(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env"))
 load_env(os.getenv("EXTRA_ENV", ""))  # например, .env от GiftRep: EXTRA_ENV=/root/probiv/.env
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+BOT_TOKEN = "8763607290:AAHIJiofzuUH0aL57WqUxrTWNJnnxEUzqR8"
 PORTALS_AUTH = os.getenv("PORTALS_AUTH", "")  # "tma query_id=..." (Authorization из мини-апа @portals)
 TONNEL_AUTH = os.getenv("TONNEL_AUTH", "")  # web-initData из localStorage market.tonnel.network
 WEBAPP_URL = "https://gifttg.online"  # адрес Mini App (кнопки в боте, кнопка меню, ссылки в уведомлениях)
@@ -273,18 +273,34 @@ def mrkt_session_authorized():
     return bool(row and row[0])
 
 
+def gift_dict(g):
+    """Лот (объект или dict) -> dict со всеми полями."""
+    if isinstance(g, dict):
+        return g
+    for f in ("model_dump", "dict", "toDict", "to_dict"):
+        fn = getattr(g, f, None)
+        if callable(fn):
+            with contextlib.suppress(Exception):
+                return fn()
+    return dict(getattr(g, "__dict__", {}) or {})
+
+
 def gift_number(g):
-    """Номер NFT (например 1234 в «Plush Pepe #1234») — нужен для картинки и определения монохромности."""
-    d = g if isinstance(g, dict) else {}
-    for a in ("number", "gift_number", "gift_num", "num", "serial", "serial_number", "nft_number", "tg_id"):
-        v = d.get(a) if d else getattr(g, a, None)
-        if isinstance(v, (int, str)) and str(v).isdigit():
+    """Номер NFT (1234 в «Plush Pepe #1234») — нужен для картинки и определения монохромности. Ищем по всем полям."""
+    d = gift_dict(g)
+    for k, v in d.items():
+        kl = str(k).lower()
+        if any(t in kl for t in ("number", "serial", "giftnum", "gift_num", "nft_num", "tg_id", "external_collection")) \
+                and isinstance(v, (int, str)) and str(v).isdigit():
             return int(v)
-    for a in ("name", "title", "gift_name", "slug"):
-        v = d.get(a) if d else getattr(g, a, None)
-        m = re.search(r"[#-](\d{1,7})\b", v) if isinstance(v, str) else None
-        if m:
-            return int(m.group(1))
+    for k in ("num", "index"):
+        if isinstance(d.get(k), int):
+            return d[k]
+    for k, v in d.items():
+        if isinstance(v, str) and any(t in str(k).lower() for t in ("name", "title", "slug", "link", "url", "id")):
+            m = re.search(r"[#-](\d{1,7})$", v.strip())
+            if m:
+                return int(m.group(1))
     return None
 
 
@@ -638,6 +654,8 @@ class MRKT(Market):
         self.client = None
         self._names = {}
         self._mcache = {}
+        self._acache = {}
+        self._warned = False
 
     def disabled_reason(self):
         if not (MRKT_API_ID and MRKT_API_HASH):
@@ -732,6 +750,33 @@ class MRKT(Market):
                 break
         return out or None
 
+    async def _attrs_paging(self, c, cname, pages=8):
+        """Модели, фоны и узоры коллекции из лотов (то, что сейчас в продаже) + мин. цена и количество."""
+        out, cursor = {"model": {}, "backdrop": {}, "symbol": {}}, ""
+        for _ in range(pages):
+            res = await c.search_gifts(collection_names=[cname], ordering="Price", low_to_high=True, count=50, cursor=cursor)
+            items = list(getattr(res, "items", None) or [])
+            for g_ in items:
+                price = nano_to_ton(g_, "sale_price", "sale_price_ton")
+                for kind, attr in (("model", "model_name"), ("backdrop", "backdrop_name"), ("symbol", "symbol_name")):
+                    name = getattr(g_, attr, None)
+                    if name and price > 0:
+                        fl, cnt = out[kind].get(name, (price, 0))
+                        out[kind][name] = (min(fl, price), cnt + 1)
+            cursor = getattr(res, "cursor", "") or ""
+            if not cursor or len(items) < 50:
+                break
+        return out
+
+    async def all_attrs(self, collection, kind):
+        hit = self._acache.get(collection)
+        if not hit or time.time() - hit[0] > 600:
+            c = await self._cl()
+            cname = self._names.get(norm(collection), collection)
+            hit = (time.time(), await self._attrs_paging(c, cname))
+            self._acache[collection] = hit
+        return hit[1].get(kind) or None
+
     async def all_models(self, collection):
         """Все модели коллекции: MRKTAPI -> методы amrkt -> постраничный перебор лотов. Кэш 10 минут."""
         hit = self._mcache.get(collection)
@@ -763,6 +808,13 @@ class MRKT(Market):
     async def kind_floors(self, collection):
         m = await self.all_models(collection)
         return {"model": {k: v for k, v in m.items() if v[0] > 0}} if m else None
+
+    def _num(self, g):
+        n = gift_number(g)
+        if n is None and not self._warned:
+            self._warned = True
+            log.warning("MRKT: у лота не нашёл номер NFT (нужен для определения моно). Поля лота: %s", sorted(gift_dict(g).keys()))
+        return n
 
     async def _floors_via_search(self, c):
         """Запасной путь: флор подарка = самый дешёвый листинг (по одному запросу на подарок)."""
@@ -831,7 +883,7 @@ class MRKT(Market):
                     if price > 0:
                         out.append(dict(market=self.name, collection=collection, price=price,
                                         model=getattr(g, "model_name", None), backdrop=getattr(g, "backdrop_name", None),
-                                        symbol=getattr(g, "symbol_name", None), id=getattr(g, "id", ""), num=gift_number(g),
+                                        symbol=getattr(g, "symbol_name", None), id=getattr(g, "id", ""), num=self._num(g),
                                         url=MRKT_LINK.format(id=getattr(g, "id", ""))))
                 cursor = getattr(res, "cursor", "") or ""
                 if not cursor or len(items) < step:
@@ -2370,6 +2422,21 @@ def scan_tokens(root):
           "authData/web-initData Tonnel → TONNEL_AUTH (необязателен).")
 
 
+async def ai_probe():
+    """python3 giftstats.py ai-probe — диагностика пустых ответов: ~9 мини-запросов к агенту без пользовательских данных."""
+    import ai
+    rows = await ai.probe()
+    for r in rows:
+        print(r)
+    print("Вывод:", *ai.probe_hint(rows), sep="\n- ")
+
+
+async def ai_test():
+    """python3 giftstats.py ai-test — безопасная проверка Timeweb AI: минимальный запрос, токен не выводится."""
+    import ai
+    print(await ai.selftest())
+
+
 async def mrkt_auth():
     """python3 giftstats.py mrkt-auth — один раз: токен MRKT для списка всех моделей (нужен pip install MRKTAPI)."""
     from MRKTAPI.auth import update_auth
@@ -2425,4 +2492,4 @@ if __name__ == "__main__":
         scan_tokens(cmd[1] if len(cmd) > 1 else "~/probiv")
         sys.exit(0)
     asyncio.run(probe() if cmd == ["probe"] else mrkt_login() if cmd == ["mrkt-login"]
-                else portals_auth() if cmd == ["portals-auth"] else mrkt_methods() if cmd == ["mrkt-methods"] else mrkt_auth() if cmd == ["mrkt-auth"] else main())
+                else portals_auth() if cmd == ["portals-auth"] else mrkt_methods() if cmd == ["mrkt-methods"] else mrkt_auth() if cmd == ["mrkt-auth"] else ai_test() if cmd == ["ai-test"] else ai_probe() if cmd == ["ai-probe"] else main())
